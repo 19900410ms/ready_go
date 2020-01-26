@@ -6,28 +6,31 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 const baseURL = "https://api.bitflyer.com/v1/"
 
-type APICient struct {
+type APIClient struct {
 	key        string
 	secret     string
 	httpClient *http.Client
 }
 
-func New(key, secret string) *APICient {
-	apiClient := &APICient{key, secret, &http.Client{}}
+func New(key, secret string) *APIClient {
+	apiClient := &APIClient{key, secret, &http.Client{}}
 	return apiClient
 }
 
-func (api APICient) header(method, endpoint string, body []byte) map[string]string {
+func (api APIClient) header(method, endpoint string, body []byte) map[string]string {
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	log.Println(timestamp)
 	message := timestamp + method + endpoint + string(body)
@@ -43,7 +46,7 @@ func (api APICient) header(method, endpoint string, body []byte) map[string]stri
 	}
 }
 
-func (api *APICient) doRequest(method, urlPath string, query map[string]string, data []byte) (body []byte, err error) {
+func (api *APIClient) doRequest(method, urlPath string, query map[string]string, data []byte) (body []byte, err error) {
 	baseURL, err := url.Parse(baseURL)
 	if err != nil {
 		return
@@ -85,7 +88,7 @@ type Balance struct {
 	Available   float64 `json:"available"`
 }
 
-func (api *APICient) GetBalance() ([]Balance, error) {
+func (api *APIClient) GetBalance() ([]Balance, error) {
 	url := "me/getbalance"
 	resp, err := api.doRequest("GET", url, map[string]string{}, nil)
 	log.Printf("url=%s resp=%s", url, string(resp))
@@ -145,4 +148,121 @@ func (api *APIClient) GetTicker(productCode string) (*Ticker, error) {
 		return nil, err
 	}
 	return &ticker, nil
+}
+
+type JsonRPC2 struct {
+	Version string      `json:"jsonrpc"`
+	Method  string      `json:"method"`
+	Params  interface{} `json:"params"`
+	Result  interface{} `json:"result,omitempty"`
+	Id      *int        `json:"id,omitempty"`
+}
+
+type SubscribeParams struct {
+	Channel string `json:"channel"`
+}
+
+func (api *APIClient) GetRealTimeTicker(symbol string, ch chan<- Ticker) {
+	u := url.URL{Scheme: "wss", Host: "ws.lightstream.bitflyer.com", Path: "/json-rpc"}
+	log.Printf("connecting to %s", u.String())
+
+	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	if err != nil {
+		log.Fatal("dial:", err)
+	}
+	defer c.Close()
+
+	channel := fmt.Sprintf("lightning_ticker_%s", symbol)
+	if err := c.WriteJSON(&JsonRPC2{Version: "2.0", Method: "subscribe", Params: &SubscribeParams{channel}}); err != nil {
+		log.Fatal("subscribe:", err)
+		return
+	}
+
+OUTER:
+	for {
+		message := new(JsonRPC2)
+		if err := c.ReadJSON(message); err != nil {
+			log.Println("read:", err)
+			return
+		}
+
+		if message.Method == "channelMessage" {
+			switch v := message.Params.(type) {
+			case map[string]interface{}:
+				for key, binary := range v {
+					if key == "message" {
+						marshaTic, err := json.Marshal(binary)
+						if err != nil {
+							continue OUTER
+						}
+						var ticker Ticker
+						if err := json.Unmarshal(marshaTic, &ticker); err != nil {
+							continue OUTER
+						}
+						ch <- ticker
+					}
+				}
+			}
+		}
+	}
+}
+
+type Order struct {
+	ID                     int     `json:"id"`
+	ChildOrderAcceptanceID string  `json:"child_order_acceptance_id"`
+	ProductCode            string  `json:"product_code"`
+	ChildOrderType         string  `json:"child_order_type"`
+	Side                   string  `json:"side"`
+	Price                  float64 `json:"price"`
+	Size                   float64 `json:"size"`
+	MinuteToExpires        int     `json:"minute_to_expire"`
+	TimeInForce            string  `json:"time_in_force"`
+	Status                 string  `json:"status"`
+	ErrorMessage           string  `json:"error_message"`
+	AveragePrice           float64 `json:"average_price"`
+	ChildOrderState        string  `json:"child_order_state"`
+	ExpireDate             string  `json:"expire_date"`
+	ChildOrderDate         string  `json:"child_order_date"`
+	OutstandingSize        float64 `json:"outstanding_size"`
+	CancelSize             float64 `json:"cancel_size"`
+	ExecutedSize           float64 `json:"executed_size"`
+	TotalCommission        float64 `json:"total_commission"`
+	Count                  int     `json:"count"`
+	Before                 int     `json:"before"`
+	After                  int     `json:"after"`
+}
+
+type ResponseSendChildOrder struct {
+	ChildOrderAcceptanceID string `json:"child_order_acceptance_id"`
+}
+
+func (api *APIClient) SendOrder(order *Order) (*ResponseSendChildOrder, error) {
+	data, err := json.Marshal(order)
+	if err != nil {
+		return nil, err
+	}
+	url := "me/sendchildorder"
+	resp, err := api.doRequest("POST", url, map[string]string{}, data)
+	if err != nil {
+		return nil, err
+	}
+	var response ResponseSendChildOrder
+	err = json.Unmarshal(resp, &response)
+	if err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (api *APIClient) ListOrder(query map[string]string) ([]Order, error) {
+	resp, err := api.doRequest("GET", "me/getchildorders", query, nil)
+	if err != nil {
+		return nil, err
+	}
+	var responseListOrder []Order
+	err = json.Unmarshal(resp, &responseListOrder)
+	if err != nil {
+		return nil, err
+	}
+	return responseListOrder, nil
 }
