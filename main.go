@@ -1,11 +1,12 @@
 package main
 
 import (
-	"fmt"
-	"ready_go/94_config/config"
+	"log"
+	"ready_go/config"
+	"ready_go/utils"
 )
 
 func main() {
-	fmt.Println(config.Config.ApiKey)
-	fmt.Println(config.Config.ApiSecret)
+	utils.LoggingSettings(config.Config.LogFile)
+	log.Println("test")
 }
