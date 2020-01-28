@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"gopkg.in/ini.v1"
+	"github.com/gopkg.in/ini.v1"
 )
 
 type ConfigList struct {
